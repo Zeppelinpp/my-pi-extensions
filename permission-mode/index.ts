@@ -22,7 +22,7 @@ const MODE_META: Record<
   bypass: {
     label: "Bypass",
     color: "error",
-    desc: "Allow all in cwd",
+    desc: "Allow everything",
   },
 };
 
@@ -65,6 +65,20 @@ function isReadOnlyBash(command: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * Heuristic: `rm` with both recursive and force flags in the same command
+ * segment (covers `rm -rf`, `rm -fr`, `rm -r -f`, `rm --recursive --force`,
+ * `sudo rm -rf`). Safe-side: quoted strings containing "rm -rf" also match.
+ */
+function isRmRf(command: string): boolean {
+  const seg = command.match(/\brm\b[^;|&]*/);
+  if (!seg) return false;
+  const s = seg[0];
+  const hasRecursive = /\s-[^\s]*r/.test(s);
+  const hasForce = /\s-[^\s]*f/.test(s);
+  return hasRecursive && hasForce;
 }
 
 function isInCwd(absPath: string, cwd: string): boolean {
@@ -134,22 +148,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const cwd = ctx.cwd;
 
-    // ── Bypass mode ──
+    // ── Bypass mode: allow everything, including outside cwd ──
     if (mode === "bypass") {
-      if (event.toolName === "write" || event.toolName === "edit") {
-        const absPath = getFilePath(event.input, cwd);
-        if (absPath && !isInCwd(absPath, cwd)) {
-          const ok = await ctx.ui.confirm(
-            "Bypass: outside cwd",
-            `Allow ${event.toolName} on file outside working dir?\n${absPath}`
-          );
-          if (!ok)
-            return {
-              block: true,
-              reason: "Blocked by permission mode (outside cwd)",
-            };
-        }
-      }
       return;
     }
 
@@ -167,6 +167,19 @@ export default function (pi: ExtensionAPI) {
               block: true,
               reason: "Blocked by permission mode (outside cwd)",
             };
+        }
+        return;
+      }
+
+      if (event.toolName === "bash") {
+        const cmd = event.input.command;
+        if (typeof cmd === "string" && isRmRf(cmd)) {
+          const ok = await ctx.ui.confirm(
+            "Accept: recursive delete",
+            `Allow recursive delete?\n${cmd}`
+          );
+          if (!ok)
+            return { block: true, reason: "Blocked by user (rm -rf)" };
         }
         return;
       }

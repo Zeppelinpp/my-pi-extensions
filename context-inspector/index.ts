@@ -3,13 +3,17 @@
  *
  * /context opens a scrollable overlay showing:
  * - System prompt source file + token count
- * - Loaded skills with per-skill token counts
- * - Messages context usage
+ * - Loaded skills with per-skill token counts (flow-wrapped)
+ * - Context usage with progress bar
+ *
+ * Height adapts to the terminal: content scrolls (with scrollbar) instead
+ * of overflowing the screen.
  *
  * Controls:
- *   q / Esc = quit popup
- *   j / ↓   = scroll down
- *   k / ↑   = scroll up
+ *   q / Esc      = quit popup
+ *   j / ↓ k / ↑  = scroll
+ *   PgDn / PgUp  = page
+ *   g / G        = top / bottom
  */
 
 import type { BuildSystemPromptOptions, ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -64,11 +68,18 @@ function pad(s: string, target: number): string {
 	return s + " ".repeat(target - v);
 }
 
+/** Format a token count compactly: 834 → "834", 12345 → "12.3k". */
+function fmtTok(n: number): string {
+	return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+}
+
 interface PopupData {
 	sysFile?: string;
 	appendFile?: string;
 	sysTokens: number;
 	skills: Array<{ name: string; tokens: number; hidden: boolean }>;
+	/** Sum of tokens over non-hidden skills. */
+	skillsTokens: number;
 	messagesTokens: number;
 	totalTokens: number | null;
 	contextWindow: number;
@@ -76,59 +87,94 @@ interface PopupData {
 
 class ContextPopup {
 	private scrollOffset = 0;
+	/** Sticky bottom: when true, resize keeps the view pinned to the end. */
+	private atBottom = false;
 	private lines: string[] = [];
+	private cachedWidth = -1;
 
 	constructor(
 		private tui: TUI,
 		private theme: Theme,
 		private done: () => void,
 		private data: PopupData,
-	) {
-		this.rebuildLines();
+	) {}
+
+	/** Rebuild content lines (width-dependent due to skill flow-wrapping). */
+	private ensureLines(innerW: number): void {
+		if (innerW === this.cachedWidth) return;
+		this.cachedWidth = innerW;
+		this.lines = this.buildLines(innerW);
 	}
 
-	private rebuildLines() {
+	private buildLines(innerW: number): string[] {
+		const th = this.theme;
 		const d = this.data;
 		const lines: string[] = [];
+		const label = (s: string) => th.fg("dim", s);
+		const value = (s: string) => th.fg("syntaxNumber", s);
 
-		lines.push("System Prompt");
-		if (d.sysFile) {
-			lines.push(`  File : ${d.sysFile}`);
-		} else {
-			lines.push(`  File : Pi default prompt`);
-		}
+		// — System prompt —
+		lines.push(th.fg("accent", " System Prompt"));
+		lines.push(
+			`   ${label("source")}  ${th.fg("muted", d.sysFile ?? "Pi default prompt")}`,
+		);
 		if (d.appendFile) {
-			lines.push(`  Append: ${d.appendFile}`);
+			lines.push(`   ${label("append")}  ${th.fg("muted", d.appendFile)}`);
 		}
-		lines.push(`  Tokens: ~${d.sysTokens.toLocaleString()}`);
+		lines.push(`   ${label("tokens")}  ${value(`~${fmtTok(d.sysTokens)}`)}`);
 		lines.push("");
 
-		lines.push(`Skills (${d.skills.length})`);
-		for (const s of d.skills) {
-			const label = s.hidden ? "(hidden)" : `~${s.tokens.toLocaleString()} tok`;
-			lines.push(`  * ${s.name}  ${label}`);
+		// — Skills, flow-wrapped at entry boundaries instead of one tall column —
+		lines.push(
+			d.skills.length > 0
+				? th.fg("accent", ` Skills (${d.skills.length})`) + label(`  ~${fmtTok(d.skillsTokens)} loaded`)
+				: th.fg("accent", " Skills (0)"),
+		);
+		if (d.skills.length === 0) {
+			lines.push(label("   (none)"));
+		} else {
+			let cur = "";
+			for (const s of d.skills) {
+				const entry = s.hidden
+					? th.fg("dim", `${s.name} (hidden)`)
+					: `${s.name} ${th.fg("dim", `~${fmtTok(s.tokens)}`)}`;
+				const candidate = cur ? `${cur}  ${entry}` : `   ${entry}`;
+				if (cur && visibleWidth(candidate) > innerW) {
+					lines.push(cur);
+					cur = `   ${entry}`;
+				} else {
+					cur = candidate;
+				}
+			}
+			if (cur) lines.push(cur);
 		}
-		if (d.skills.length === 0) lines.push("  (none)");
 		lines.push("");
 
-		lines.push("Messages");
-		lines.push(`  Tokens: ~${d.messagesTokens.toLocaleString()}`);
-		if (d.totalTokens != null) {
-			lines.push(`  Total : ~${d.totalTokens.toLocaleString()} / ${d.contextWindow.toLocaleString()}`);
-			const pct = ((d.totalTokens / d.contextWindow) * 100).toFixed(1);
-			lines.push(`  Usage : ${pct}%`);
+		// — Context usage —
+		lines.push(th.fg("accent", " Context Usage"));
+		if (d.totalTokens != null && d.contextWindow > 0) {
+			const pct = Math.min(100, Math.max(0, (d.totalTokens / d.contextWindow) * 100));
+			const color = pct > 80 ? "error" : pct > 50 ? "warning" : "success";
+			const barW = Math.max(6, Math.min(20, innerW - 32));
+			const filled = Math.round((pct / 100) * barW);
+			const bar = th.fg(color, "█".repeat(filled)) + th.fg("dim", "░".repeat(barW - filled));
+			lines.push(
+				`   ${bar} ${th.fg(color, `${pct.toFixed(0)}%`)} ${label(`of ${fmtTok(d.contextWindow)} window`)}`,
+			);
+			lines.push(`   ${label("total")}   ${value(`~${fmtTok(d.totalTokens)}`)}`);
 		}
+		lines.push(`   ${label("messages")}  ${value(`~${fmtTok(d.messagesTokens)}`)}`);
 
-		this.lines = lines;
+		return lines;
 	}
 
-	/** How many content rows fit inside the popup without clipping the frame. */
+	/** How many content rows fit inside the popup for the current terminal height. */
 	private get contentHeight(): number {
 		const termRows = this.tui.terminal.rows;
-		// Header (top + title + sep) = 3 rows, bottom border = 1 row, leave 2-row margin
-		const maxTotal = Math.max(6, termRows - 2);
-		const maxContent = maxTotal - 4;
-		return Math.min(this.lines.length, Math.max(4, maxContent));
+		// chrome: top border (1) + footer line (1) + bottom border (1) = 3,
+		// plus a 2-row vertical margin against the terminal edge.
+		const maxContent = Math.max(4, termRows - 2 - 3);
+		return Math.min(this.lines.length, maxContent);
 	}
 
 	handleInput(data: string): void {
@@ -136,50 +182,88 @@ class ContextPopup {
 			this.done();
 			return;
 		}
+		const h = this.contentHeight;
+		const maxScroll = Math.max(0, this.lines.length - h);
 		if (matchesKey(data, "down") || data === "j") {
-			const maxScroll = Math.max(0, this.lines.length - this.contentHeight);
 			this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
 		} else if (matchesKey(data, "up") || data === "k") {
 			this.scrollOffset = Math.max(0, this.scrollOffset - 1);
+		} else if (matchesKey(data, "pageDown")) {
+			this.scrollOffset = Math.min(maxScroll, this.scrollOffset + h);
+		} else if (matchesKey(data, "pageUp")) {
+			this.scrollOffset = Math.max(0, this.scrollOffset - h);
+		} else if (data === "g") {
+			this.scrollOffset = 0;
+		} else if (data === "G") {
+			this.scrollOffset = maxScroll;
+		} else {
+			return;
 		}
+		this.atBottom = this.scrollOffset === maxScroll;
+		this.tui.requestRender();
 	}
 
 	render(width: number): string[] {
 		const th = this.theme;
 		const innerW = Math.max(40, width - 2);
+		this.ensureLines(innerW);
 		const h = this.contentHeight;
+		// Clamp (or stick to bottom) after height/width changes, e.g. terminal resize.
+		const maxScroll = Math.max(0, this.lines.length - h);
+		this.scrollOffset = this.atBottom
+			? maxScroll
+			: Math.max(0, Math.min(maxScroll, this.scrollOffset));
 		const b = (s: string) => th.fg("border", s);
 
 		const out: string[] = [];
 
-		// Frame top
-		out.push(b(`╭${"─".repeat(innerW)}╮`));
+		// Top border with embedded title
+		const title = th.fg("accent", " Context Inspector ");
+		const titleW = visibleWidth(" Context Inspector ");
+		out.push(b("╭") + b("─") + title + b("─".repeat(Math.max(0, innerW - 1 - titleW))) + b("╮"));
 
-		// Title
-		out.push(b("│") + pad(th.fg("accent", " Context Inspector"), innerW) + b("│"));
+		// Scrollbar geometry (only when content overflows)
+		const scrollable = this.lines.length > h;
+		const thumbSize = scrollable ? Math.max(1, Math.round((h * h) / this.lines.length)) : 0;
+		const thumbStart =
+			scrollable && maxScroll > 0 ? Math.round((this.scrollOffset / maxScroll) * (h - thumbSize)) : 0;
 
-		// Separator
-		out.push(b(`├${"─".repeat(innerW)}┤`));
-
-		// Content
-		const start = this.scrollOffset;
+		// Content rows
 		for (let i = 0; i < h; i++) {
-			const idx = start + i;
-			if (idx < this.lines.length) {
-				const raw = this.lines[idx] ?? "";
-				out.push(b("│") + pad(truncateToWidth(raw, innerW), innerW) + b("│"));
+			const idx = this.scrollOffset + i;
+			const raw = this.lines[idx] ?? "";
+			if (scrollable) {
+				const content = pad(truncateToWidth(raw, innerW - 2), innerW - 2);
+				const isThumb = i >= thumbStart && i < thumbStart + thumbSize;
+				const bar = isThumb ? th.fg("accent", "█") : th.fg("dim", "│");
+				out.push(b("│") + content + " " + bar + b("│"));
 			} else {
-				out.push(b(`│${" ".repeat(innerW)}│`));
+				out.push(b("│") + pad(truncateToWidth(raw, innerW), innerW) + b("│"));
 			}
 		}
 
-		// Frame bottom — plain line, no footer text
+		// Footer: key hints left, scroll position right
+		const hint = th.fg("dim", " q quit · j/k scroll · PgUp/PgDn · g/G");
+		const pos = scrollable ? th.fg("dim", `${this.scrollOffset + 1}/${this.lines.length}`) : "";
+		let footer = pad(truncateToWidth(hint, innerW), innerW);
+		if (pos) {
+			const space = innerW - visibleWidth(hint) - visibleWidth(pos);
+			footer =
+				space >= 1
+					? hint + " ".repeat(space) + pos
+					: pad(truncateToWidth(hint, innerW), innerW);
+		}
+		out.push(b("│") + footer + b("│"));
+
+		// Bottom border
 		out.push(b(`╰${"─".repeat(innerW)}╯`));
 
 		return out;
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.cachedWidth = -1;
+	}
 	dispose(): void {}
 }
 
@@ -192,7 +276,7 @@ export default function contextInspector(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("context", {
-		description: "Open context inspector popup (q=quit, j/k=scroll)",
+		description: "Open context inspector popup (q=quit, j/k=scroll, PgUp/PgDn=page)",
 		handler: async (_args, ctx) => {
 			if (!captured) {
 				ctx.ui.notify("No context captured yet. Send a message first.", "warning");
@@ -231,12 +315,14 @@ export default function contextInspector(pi: ExtensionAPI) {
 				tokens: getSkillTokens(s.filePath),
 				hidden: s.disableModelInvocation,
 			}));
+			const skillsTokens = skills.reduce((sum, s) => (s.hidden ? sum : sum + s.tokens), 0);
 
 			const data: PopupData = {
 				sysFile: sysFiles.system,
 				appendFile: sysFiles.append,
 				sysTokens,
 				skills,
+				skillsTokens,
 				messagesTokens,
 				totalTokens,
 				contextWindow,

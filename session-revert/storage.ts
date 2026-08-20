@@ -152,6 +152,38 @@ export async function loadChanges(sessionId: string): Promise<ChangeRecord[]> {
   return out;
 }
 
+// -- Per-session write serialization --
+
+/**
+ * saveChange performs a read-modify-write (append → reload → prune-rewrite +
+ * orphan cleanup). Concurrent tool_result handlers for the same session can
+ * interleave those steps: a writer whose loadChanges() ran before another
+ * writer's append would rewrite the ledger without that record and then
+ * delete its snapshot dir as an "orphan". Serialize per sessionId with a
+ * promise chain so the RMW sequence is atomic relative to other saves.
+ */
+const saveChains = new Map<string, Promise<void>>();
+
+export function saveChange(
+  sessionId: string,
+  record: ChangeRecord,
+  protectedSnapshotIds?: Set<string>,
+): Promise<void> {
+  const prev = saveChains.get(sessionId) ?? Promise.resolve();
+  const next = prev.then(
+    () => saveChangeSerialized(sessionId, record, protectedSnapshotIds),
+    () => saveChangeSerialized(sessionId, record, protectedSnapshotIds),
+  );
+  // Store a swallowed copy so one failure does not poison the chain.
+  const tail = next.catch(() => {});
+  saveChains.set(sessionId, tail);
+  // Drop the map entry once the chain drains to avoid unbounded growth.
+  tail.then(() => {
+    if (saveChains.get(sessionId) === tail) saveChains.delete(sessionId);
+  });
+  return next;
+}
+
 /**
  * Append a change record, then prune to MAX_CHANGES:
  *  - rewrite the jsonl keeping the newest MAX_CHANGES records
@@ -161,7 +193,7 @@ export async function loadChanges(sessionId: string): Promise<ChangeRecord[]> {
  * Side effect: a new tracked change invalidates the redo future, so the
  * redo stack is cleared BEFORE appending.
  */
-export async function saveChange(
+async function saveChangeSerialized(
   sessionId: string,
   record: ChangeRecord,
   protectedSnapshotIds?: Set<string>,

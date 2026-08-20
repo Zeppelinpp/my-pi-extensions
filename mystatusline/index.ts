@@ -4,7 +4,8 @@
  * Layout (3+ lines when inside a git repo with changes):
  * 1. git repo + branch | [model] + thinking effort
  * 2. context usage progress bar | permission mode
- * 3+. git diff stats: file_name (+20|-6), wrapped at entry boundaries to fit terminal width
+ * 3. git diff stats: file_name (+20|-6), wrapped at entry boundaries, capped at 3 lines
+ *    with `... (N files) +A|-D` overflow summary
  */
 
 import type { ExtensionAPI, ExtensionContext, Theme, ReadonlyFooterDataProvider } from "@mariozechner/pi-coding-agent";
@@ -38,6 +39,50 @@ function findGitRepoDir(cwd: string): string | null {
 	}
 }
 
+// ── Caches ──
+// render() runs on the TUI hot path (potentially per message during
+// streaming); spawning git and walking the dir tree on every render blocks
+// the UI. Cache both with short TTLs so renders are cheap and stats still
+// refresh promptly.
+
+const REPO_DIR_TTL_MS = 5000;
+const repoDirCache = new Map<string, { dir: string | null; ts: number }>();
+
+function findGitRepoDirCached(cwd: string): string | null {
+	const hit = repoDirCache.get(cwd);
+	if (hit && Date.now() - hit.ts < REPO_DIR_TTL_MS) return hit.dir;
+	const dir = findGitRepoDir(cwd);
+	repoDirCache.set(cwd, { dir, ts: Date.now() });
+	return dir;
+}
+
+const DIFF_STATS_TTL_MS = 2000;
+let diffStatsCache: {
+	repoDir: string;
+	stats: Array<{ path: string; added: number; removed: number }> | null;
+	ts: number;
+} | null = null;
+
+/** Drop cached diff stats (e.g. after a turn in which the agent edited files). */
+function invalidateDiffStats(): void {
+	diffStatsCache = null;
+}
+
+function getGitDiffStatsCached(
+	repoDir: string,
+): Array<{ path: string; added: number; removed: number }> | null {
+	if (
+		diffStatsCache &&
+		diffStatsCache.repoDir === repoDir &&
+		Date.now() - diffStatsCache.ts < DIFF_STATS_TTL_MS
+	) {
+		return diffStatsCache.stats;
+	}
+	const stats = getGitDiffStats(repoDir);
+	diffStatsCache = { repoDir, stats, ts: Date.now() };
+	return stats;
+}
+
 /** Get current thinking level from the API or fallback. */
 function getCurrentThinkingLevel(pi: ExtensionAPI): string {
 	try {
@@ -59,6 +104,7 @@ function runGitDiffNumstat(
 			{
 				encoding: "utf8",
 				stdio: ["ignore", "pipe", "ignore"],
+				timeout: 5000,
 			},
 		);
 		if (result.status !== 0) return null;
@@ -180,7 +226,7 @@ function renderLine1(
 	footerData: ReadonlyFooterDataProvider,
 	thinkingLevel: string,
 ): string {
-	const repoDir = findGitRepoDir(ctx.cwd);
+	const repoDir = findGitRepoDirCached(ctx.cwd);
 	let left: string;
 
 	if (repoDir) {
@@ -232,10 +278,10 @@ function renderLine3(
 	theme: Theme,
 	ctx: ExtensionContext,
 ): string[] {
-	const repoDir = findGitRepoDir(ctx.cwd);
+	const repoDir = findGitRepoDirCached(ctx.cwd);
 	if (!repoDir) return [];
 
-	const stats = getGitDiffStats(repoDir);
+	const stats = getGitDiffStatsCached(repoDir);
 	if (!stats || stats.length === 0) return [];
 
 	const entries = stats.map(({ path, added, removed }) => {
@@ -271,6 +317,27 @@ function renderLine3(
 		}
 	}
 	if (current) lines.push(current);
+
+	// Cap at 3 lines; if entries overflow, append an ellipsis plus an overall
+	// summary (total changed files and summed +/-) to the last line.
+	const MAX_DIFF_LINES = 3;
+	if (lines.length > MAX_DIFF_LINES) {
+		const totalAdded = stats.reduce((sum, s) => sum + s.added, 0);
+		const totalRemoved = stats.reduce((sum, s) => sum + s.removed, 0);
+		const summary =
+			theme.fg("dim", ` ... (${stats.length} files) `) +
+			theme.fg("success", `+${totalAdded}`) +
+			theme.fg("dim", "|") +
+			theme.fg("error", `-${totalRemoved}`);
+		const summaryW = visibleWidth(` ... (${stats.length} files) +${totalAdded}|-${totalRemoved}`);
+		const kept = lines.slice(0, MAX_DIFF_LINES);
+		const lastIndex = MAX_DIFF_LINES - 1;
+		if (visibleWidth(kept[lastIndex]) + summaryW > width) {
+			kept[lastIndex] = truncateToWidth(kept[lastIndex], Math.max(3, width - summaryW));
+		}
+		kept[lastIndex] += summary;
+		return kept;
+	}
 
 	return lines;
 }
@@ -324,7 +391,11 @@ export default function (pi: ExtensionAPI) {
 		requestRender?.();
 	});
 
-	pi.on("turn_end", () => requestRender?.());
+	pi.on("turn_end", () => {
+		// The agent likely edited files this turn — refresh stats on next render.
+		invalidateDiffStats();
+		requestRender?.();
+	});
 	pi.on("message_end", () => requestRender?.());
 	pi.on("model_select", () => requestRender?.());
 	pi.on("session_tree", () => requestRender?.());

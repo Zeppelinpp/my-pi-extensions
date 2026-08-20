@@ -24,6 +24,7 @@ import {
   snapshotForRedo,
   type RedoEntry,
 } from "../storage.ts";
+import type { ChangeRecord } from "../core.ts";
 
 // -- helpers --
 
@@ -146,6 +147,38 @@ test("saveChange: prunes to 100, deletes orphan snapshot dirs, keeps referenced"
   }
   // Sidecar survives
   assert.equal(await exists(join(sessionDir, "changes.jsonl")), true);
+});
+
+test("saveChange: concurrent saves are serialized — no lost records, no orphan-deleted dirs", async () => {
+  const dir = await freshDir();
+  const sessionDir = join(dir, SID);
+
+  const N = MAX_CHANGES + 10;
+  for (let n = 1; n <= N; n++) {
+    await mkdir(join(sessionDir, `snap-${n}`), { recursive: true });
+  }
+  // Mirror production: snapshots n..N already exist on disk but have no
+  // ledger record yet (tool_call ran, tool_result pending), so each save
+  // protects the still-unsaved snapshots — same as index.ts does.
+  await Promise.all(
+    Array.from({ length: N }, (_, i) => {
+      const n = i + 1;
+      const pendingSnaps = new Set<string>();
+      for (let k = n; k <= N; k++) pendingSnaps.add(`snap-${k}`);
+      return saveChange(SID, makeRecord(n), pendingSnaps);
+    }),
+  );
+
+  const changes = await loadChanges(SID);
+  assert.equal(changes.length, MAX_CHANGES, "no record lost or duplicated under concurrency");
+  assert.deepEqual(
+    changes.map((c) => c.entryId),
+    Array.from({ length: MAX_CHANGES }, (_, i) => `e${i + 11}`),
+    "kept records are the newest, in append order",
+  );
+  // Kept records' snapshot dirs survive; only pruned ones are gone.
+  assert.equal(await exists(join(sessionDir, "snap-1")), false);
+  assert.equal(await exists(join(sessionDir, `snap-${N}`)), true);
 });
 
 test("saveChange: clears the redo stack", async () => {
