@@ -12,7 +12,7 @@ const MODE_META: Record<
   accept: {
     label: "Accept",
     color: "success",
-    desc: "Allow all edits in cwd",
+    desc: "Allow edits in cwd, writes anywhere",
   },
   ask: {
     label: "Ask",
@@ -93,7 +93,7 @@ function getFilePath(input: any, cwd: string): string | null {
 }
 
 export default function (pi: ExtensionAPI) {
-  let mode: Mode = "accept";
+  let mode: Mode = "bypass";
   let footerEnabled = true;
 
   function persistMode() {
@@ -153,14 +153,19 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // ── Accept edits mode ──
+    // ── Accept mode: write anywhere, edit outside cwd still asks ──
     if (mode === "accept") {
-      if (event.toolName === "edit" || event.toolName === "write") {
+      if (event.toolName === "write") {
+        // writes are accepted regardless of location (inside or outside cwd)
+        return;
+      }
+
+      if (event.toolName === "edit") {
         const absPath = getFilePath(event.input, cwd);
         if (absPath && !isInCwd(absPath, cwd)) {
           const ok = await ctx.ui.confirm(
-            "Accept edits: outside cwd",
-            `Allow ${event.toolName} on file outside working dir?\n${absPath}`
+            "Accept: edit outside cwd",
+            `Allow edit on file outside working dir?\n${absPath}`
           );
           if (!ok)
             return {

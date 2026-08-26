@@ -8,7 +8,7 @@ import ext from "../index.ts";
 
 type ConfirmCall = { title: string; message: string };
 
-function setup(opts: { confirmResult?: boolean } = {}) {
+function setup(opts: { confirmResult?: boolean; mode?: string } = {}) {
   const handlers: Record<string, Function> = {};
   const commands: Record<string, { handler: Function }> = {};
   const pi = {
@@ -17,7 +17,6 @@ function setup(opts: { confirmResult?: boolean } = {}) {
     registerShortcut: () => {},
     appendEntry: () => {},
   };
-  ext(pi as any);
 
   const confirms: ConfirmCall[] = [];
   const ctx = {
@@ -32,6 +31,11 @@ function setup(opts: { confirmResult?: boolean } = {}) {
     },
     sessionManager: { getEntries: () => [] },
   };
+
+  ext(pi as any);
+  if (opts.mode) {
+    commands.mode!.handler(opts.mode, ctx as any);
+  }
   return { handlers, commands, ctx, confirms };
 }
 
@@ -44,6 +48,13 @@ const tests: [string, TestFn][] = [];
 const test = (name: string, fn: TestFn) => tests.push([name, fn]);
 
 // -- bypass: everything allowed, no confirms, even outside cwd --
+
+test("default mode is bypass: write outside cwd allowed without confirm", async () => {
+  const { handlers, ctx, confirms } = setup(); // no mode set
+  const r = await handlers.tool_call!(write("/etc/passwd"), ctx);
+  assert.equal(r, undefined);
+  assert.equal(confirms.length, 0, "no confirm in default bypass");
+});
 
 test("bypass: write outside cwd allowed without confirm", async () => {
   const { handlers, commands, ctx, confirms } = setup();
@@ -61,24 +72,31 @@ test("bypass: edit outside cwd and dangerous bash allowed without confirm", asyn
   assert.equal(confirms.length, 0);
 });
 
-// -- accept: cwd edits free, outside cwd confirmed, rm -rf confirmed --
+// -- accept: cwd edits free, writes anywhere, edit outside cwd confirmed, rm -rf confirmed --
 
 test("accept: write inside cwd allowed without confirm", async () => {
-  const { handlers, ctx, confirms } = setup(); // default mode = accept
+  const { handlers, ctx, confirms } = setup({ mode: "accept" });
   const r = await handlers.tool_call!(write("src/a.ts"), ctx);
   assert.equal(r, undefined);
   assert.equal(confirms.length, 0);
 });
 
-test("accept: write outside cwd still requires confirm", async () => {
-  const { handlers, ctx, confirms } = setup({ confirmResult: false });
+test("accept: write outside cwd allowed without confirm", async () => {
+  const { handlers, ctx, confirms } = setup({ mode: "accept" });
   const r = await handlers.tool_call!(write("../outside.ts"), ctx);
+  assert.equal(r, undefined);
+  assert.equal(confirms.length, 0);
+});
+
+test("accept: edit outside cwd still requires confirm", async () => {
+  const { handlers, ctx, confirms } = setup({ confirmResult: false, mode: "accept" });
+  const r = await handlers.tool_call!(edit("../outside.ts"), ctx);
   assert.equal(confirms.length, 1);
   assert.equal((r as any)?.block, true);
 });
 
 test("accept: rm -rf asks; allowed when confirmed", async () => {
-  const { handlers, ctx, confirms } = setup({ confirmResult: true });
+  const { handlers, ctx, confirms } = setup({ mode: "accept" });
   const r = await handlers.tool_call!(bash("rm -rf /tmp/build"), ctx);
   assert.equal(r, undefined, "confirmed → allowed");
   assert.equal(confirms.length, 1);
@@ -86,7 +104,7 @@ test("accept: rm -rf asks; allowed when confirmed", async () => {
 });
 
 test("accept: rm -rf blocked when declined", async () => {
-  const { handlers, ctx, confirms } = setup({ confirmResult: false });
+  const { handlers, ctx, confirms } = setup({ confirmResult: false, mode: "accept" });
   const r = await handlers.tool_call!(bash("rm -rf /tmp/build"), ctx);
   assert.equal((r as any)?.block, true);
   assert.match((r as any).reason, /rm -rf/);
@@ -103,7 +121,7 @@ test("accept: rm -rf detection variants", async () => {
     "cd /tmp && rm -rf node_modules",
   ];
   for (const cmd of variants) {
-    const { handlers, ctx, confirms } = setup();
+    const { handlers, ctx, confirms } = setup({ mode: "accept" });
     await handlers.tool_call!(bash(cmd), ctx);
     assert.equal(confirms.length, 1, `should ask: ${cmd}`);
   }
@@ -119,7 +137,7 @@ test("accept: non-destructive bash runs without confirm", async () => {
     "grep -rn foo src",    // contains r but not rm
   ];
   for (const cmd of harmless) {
-    const { handlers, ctx, confirms } = setup();
+    const { handlers, ctx, confirms } = setup({ mode: "accept" });
     const r = await handlers.tool_call!(bash(cmd), ctx);
     assert.equal(r, undefined, `should pass: ${cmd}`);
     assert.equal(confirms.length, 0, `no confirm: ${cmd}`);
