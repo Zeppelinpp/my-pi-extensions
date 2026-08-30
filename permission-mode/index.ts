@@ -1,5 +1,5 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { resolve, relative } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 type Mode = "accept" | "ask" | "bypass";
 
@@ -17,7 +17,7 @@ const MODE_META: Record<
   ask: {
     label: "Ask",
     color: "warning",
-    desc: "Confirm write/edit/bash",
+    desc: "Confirm write/edit/shell",
   },
   bypass: {
     label: "Bypass",
@@ -55,7 +55,10 @@ const DANGEROUS_PATTERNS = [
 ];
 
 function isReadOnlyBash(command: string): boolean {
-  const trimmed = command.trim();
+  const trimmed = command.trim().toLowerCase();
+  // Be conservative: prefix checks cannot safely classify chained commands,
+  // substitutions, pipelines, or redirects as read-only on any shell.
+  if (/[\r\n;&|<>`]/.test(trimmed) || /\$\s*\(/.test(trimmed)) return false;
   for (const p of DANGEROUS_PATTERNS) {
     if (trimmed.includes(p)) return false;
   }
@@ -73,17 +76,32 @@ function isReadOnlyBash(command: string): boolean {
  * `sudo rm -rf`). Safe-side: quoted strings containing "rm -rf" also match.
  */
 function isRmRf(command: string): boolean {
-  const seg = command.match(/\brm\b[^;|&]*/);
-  if (!seg) return false;
-  const s = seg[0];
-  const hasRecursive = /\s-[^\s]*r/.test(s);
-  const hasForce = /\s-[^\s]*f/.test(s);
-  return hasRecursive && hasForce;
+  for (const match of command.matchAll(/\brm\b[^;|&]*/gi)) {
+    const segment = match[0];
+    const hasRecursive = /(?:\s-[^\s]*r|\s--recursive\b)/i.test(segment);
+    const hasForce = /(?:\s-[^\s]*f|\s--force\b)/i.test(segment);
+    if (hasRecursive && hasForce) return true;
+  }
+  return false;
+}
+
+function isPowerShellRecursiveDelete(command: string): boolean {
+  const segments = command.split(/[;\r\n|&]+/);
+  for (const segment of segments) {
+    if (!/(?:^|\s)(?:remove-item|rm|ri|del|erase|rmdir|rd)(?:\s|$)/i.test(segment)) continue;
+    const hasRecursive = /(?:\s-(?:recurse|r)(?:\s|$)|\s\/(?:s)(?:\s|$))/i.test(segment);
+    const hasForce = /(?:\s-(?:force|fo|f)(?:\s|$)|\s\/(?:q)(?:\s|$))/i.test(segment);
+    if (hasRecursive && hasForce) return true;
+  }
+  return false;
 }
 
 function isInCwd(absPath: string, cwd: string): boolean {
   const rel = relative(cwd, absPath);
-  return !rel.startsWith("..") && !rel.startsWith("/");
+  return (
+    rel === "" ||
+    (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
+  );
 }
 
 function getFilePath(input: any, cwd: string): string | null {
@@ -147,6 +165,7 @@ export default function (pi: ExtensionAPI) {
   // ── Tool interception ──
   pi.on("tool_call", async (event, ctx) => {
     const cwd = ctx.cwd;
+    const toolName = event.toolName.toLowerCase();
 
     // ── Bypass mode: allow everything, including outside cwd ──
     if (mode === "bypass") {
@@ -155,12 +174,12 @@ export default function (pi: ExtensionAPI) {
 
     // ── Accept mode: write anywhere, edit outside cwd still asks ──
     if (mode === "accept") {
-      if (event.toolName === "write") {
+      if (toolName === "write") {
         // writes are accepted regardless of location (inside or outside cwd)
         return;
       }
 
-      if (event.toolName === "edit") {
+      if (toolName === "edit") {
         const absPath = getFilePath(event.input, cwd);
         if (absPath && !isInCwd(absPath, cwd)) {
           const ok = await ctx.ui.confirm(
@@ -176,15 +195,25 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (event.toolName === "bash") {
+      if (toolName === "bash" || toolName === "powershell") {
         const cmd = event.input.command;
-        if (typeof cmd === "string" && isRmRf(cmd)) {
+        const isRecursiveDelete =
+          typeof cmd === "string" &&
+          (toolName === "bash" ? isRmRf(cmd) : isPowerShellRecursiveDelete(cmd));
+        if (isRecursiveDelete) {
           const ok = await ctx.ui.confirm(
             "Accept: recursive delete",
             `Allow recursive delete?\n${cmd}`
           );
-          if (!ok)
-            return { block: true, reason: "Blocked by user (rm -rf)" };
+          if (!ok) {
+            return {
+              block: true,
+              reason:
+                toolName === "bash"
+                  ? "Blocked by user (rm -rf)"
+                  : "Blocked by user (recursive delete)",
+            };
+          }
         }
         return;
       }
@@ -193,7 +222,7 @@ export default function (pi: ExtensionAPI) {
 
     // ── Ask mode ──
     if (mode === "ask") {
-      if (event.toolName === "write" || event.toolName === "edit") {
+      if (toolName === "write" || toolName === "edit") {
         const absPath = getFilePath(event.input, cwd);
         const location = absPath
           ? isInCwd(absPath, cwd)
@@ -201,19 +230,22 @@ export default function (pi: ExtensionAPI) {
             : "outside cwd"
           : "unknown location";
         const ok = await ctx.ui.confirm(
-          `Ask: ${event.toolName}`,
-          `Allow ${event.toolName}?\n${absPath || ""}\n(${location})`
+          `Ask: ${toolName}`,
+          `Allow ${toolName}?\n${absPath || ""}\n(${location})`
         );
         if (!ok)
           return { block: true, reason: "Blocked by user (ask mode)" };
         return;
       }
 
-      if (event.toolName === "bash") {
+      if (toolName === "bash" || toolName === "powershell") {
         const cmd = event.input.command as string;
-        if (isReadOnlyBash(cmd)) return;
+        if (toolName === "bash" && isReadOnlyBash(cmd)) return;
 
-        const ok = await ctx.ui.confirm("Ask: bash", `Allow bash command?\n${cmd}`);
+        const ok = await ctx.ui.confirm(
+          `Ask: ${toolName}`,
+          `Allow ${toolName} command?\n${cmd}`,
+        );
         if (!ok)
           return { block: true, reason: "Blocked by user (ask mode)" };
         return;

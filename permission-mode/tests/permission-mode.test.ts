@@ -8,7 +8,7 @@ import ext from "../index.ts";
 
 type ConfirmCall = { title: string; message: string };
 
-function setup(opts: { confirmResult?: boolean; mode?: string } = {}) {
+function setup(opts: { confirmResult?: boolean; mode?: string; cwd?: string } = {}) {
   const handlers: Record<string, Function> = {};
   const commands: Record<string, { handler: Function }> = {};
   const pi = {
@@ -20,7 +20,7 @@ function setup(opts: { confirmResult?: boolean; mode?: string } = {}) {
 
   const confirms: ConfirmCall[] = [];
   const ctx = {
-    cwd: "/tmp/work",
+    cwd: opts.cwd ?? "/tmp/work",
     ui: {
       confirm: async (title: string, message: string) => {
         confirms.push({ title, message });
@@ -42,6 +42,10 @@ function setup(opts: { confirmResult?: boolean; mode?: string } = {}) {
 const write = (path: string) => ({ toolName: "write", input: { path } });
 const edit = (path: string) => ({ toolName: "edit", input: { path } });
 const bash = (command: string) => ({ toolName: "bash", input: { command } });
+const powershell = (command: string, toolName = "powershell") => ({
+  toolName,
+  input: { command },
+});
 
 type TestFn = () => Promise<void>;
 const tests: [string, TestFn][] = [];
@@ -95,6 +99,26 @@ test("accept: edit outside cwd still requires confirm", async () => {
   assert.equal((r as any)?.block, true);
 });
 
+test("accept: an in-cwd path beginning with two dots is not treated as parent traversal", async () => {
+  const { handlers, ctx, confirms } = setup({ mode: "accept" });
+  const r = await handlers.tool_call!(edit("..cache/file.ts"), ctx);
+  assert.equal(r, undefined);
+  assert.equal(confirms.length, 0);
+});
+
+if (process.platform === "win32") {
+  test("accept: cross-drive edit is outside cwd", async () => {
+    const { handlers, ctx, confirms } = setup({
+      confirmResult: false,
+      mode: "accept",
+      cwd: "C:\\work",
+    });
+    const r = await handlers.tool_call!(edit("D:\\outside.ts"), ctx);
+    assert.equal((r as any)?.block, true);
+    assert.equal(confirms.length, 1);
+  });
+}
+
 test("accept: rm -rf asks; allowed when confirmed", async () => {
   const { handlers, ctx, confirms } = setup({ mode: "accept" });
   const r = await handlers.tool_call!(bash("rm -rf /tmp/build"), ctx);
@@ -144,6 +168,24 @@ test("accept: non-destructive bash runs without confirm", async () => {
   }
 });
 
+test("accept: destructive PowerShell asks in either tool-name casing", async () => {
+  for (const toolName of ["powershell", "PowerShell"]) {
+    const { handlers, ctx, confirms } = setup({ confirmResult: false, mode: "accept" });
+    const r = await handlers.tool_call!(
+      powershell("Remove-Item C:\\build -Recurse -Force", toolName),
+      ctx,
+    );
+    assert.equal((r as any)?.block, true);
+    assert.equal(confirms.length, 1);
+  }
+});
+
+test("accept: non-destructive PowerShell runs without confirm", async () => {
+  const { handlers, ctx, confirms } = setup({ mode: "accept" });
+  assert.equal(await handlers.tool_call!(powershell("Get-ChildItem"), ctx), undefined);
+  assert.equal(confirms.length, 0);
+});
+
 // -- ask mode unchanged --
 
 test("ask: readonly bash passes, everything else asks", async () => {
@@ -156,6 +198,16 @@ test("ask: readonly bash passes, everything else asks", async () => {
   assert.equal((await handlers.tool_call!(bash("git status"), ctx) as any)?.block, true);
   assert.equal((await handlers.tool_call!(write("a.ts"), ctx) as any)?.block, true);
   assert.equal(confirms.length, 2, "non-readonly bash and write both ask");
+});
+
+test("ask: chained commands and PowerShell require confirmation", async () => {
+  const { handlers, ctx, confirms } = setup({ confirmResult: false, mode: "ask" });
+  assert.equal((await handlers.tool_call!(bash("ls && touch x"), ctx) as any)?.block, true);
+  assert.equal(
+    (await handlers.tool_call!(powershell("Get-ChildItem"), ctx) as any)?.block,
+    true,
+  );
+  assert.equal(confirms.length, 2);
 });
 
 // -- runner --
