@@ -8,11 +8,12 @@
  *    with `... (N files) +A|-D` overflow summary
  */
 
-import type { ExtensionAPI, ExtensionContext, Theme, ReadonlyFooterDataProvider } from "@mariozechner/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme, ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join, basename } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -20,9 +21,11 @@ import { dirname, join, basename } from "node:path";
 
 /** Shorten a path by replacing the home directory with `~`. */
 function shortenPath(p: string): string {
-	const home = process.env.HOME || process.env.USERPROFILE || "";
-	if (home && p.startsWith(home)) {
-		return "~" + p.slice(home.length);
+	const home = homedir();
+	const rel = relative(home, p);
+	if (rel === "") return "~";
+	if (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`)) {
+		return join("~", rel);
 	}
 	return p;
 }
@@ -210,6 +213,8 @@ function thinkingColor(level: string): string {
 			return "thinkingHigh";
 		case "xhigh":
 			return "thinkingXhigh";
+		case "max":
+			return "thinkingMax";
 		default:
 			return "thinkingOff";
 	}
