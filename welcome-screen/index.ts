@@ -10,6 +10,7 @@
 
 import {
   VERSION,
+  keyHint,
   type ExtensionAPI,
   type ExtensionContext,
   type Theme,
@@ -21,6 +22,7 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 const BRIDGE_KEY = "__piWelcomeScreenBridge";
 const POLL_MS = 50;
@@ -130,9 +132,24 @@ function restorePanel(tui: TUI): void {
   delete keyed[BRIDGE_KEY];
 }
 
+function pathLeaf(label: string): string {
+  const normalized = label.replace(/\\/g, "/");
+  return normalized.split("/").pop() ?? label;
+}
+
+function shortenHome(path: string): string {
+  const home = homedir();
+  const rel = relative(home, path);
+  if (rel === "") return "~";
+  if (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`)) {
+    return join("~", rel);
+  }
+  return path;
+}
+
 function extName(label: string): string {
   let s = label.trim().replace(/^npm:/, "").replace(/\\/g, "/");
-  const colon = s.indexOf(":");
+  const colon = s.lastIndexOf(":");
   if (colon > 1) s = s.slice(0, colon); // strip ":src" entry-point suffix
   if (s.includes("/") && !s.startsWith("@")) s = s.split("/").pop() ?? s;
   return s.replace(/\.[cm]?[jt]s$/, "");
@@ -163,7 +180,7 @@ function parsePanel(panel: PanelBridge["panel"]): Sections {
     items[key] = [
       ...new Set(
         key === "ctx"
-          ? body.map((p) => p.split("/").pop() ?? p)
+          ? body.map(pathLeaf)
           : key === "ext"
             ? body.map(extName)
             : body,
@@ -241,7 +258,7 @@ class WelcomeHeader implements Component {
   private brandLines(): string[] {
     const theme = this.theme;
     const model = this.ctx.model;
-    const cwd = process.cwd().replace(homedir(), "~");
+    const cwd = shortenHome(this.ctx.cwd);
 
     // L1 wordmark — "pi" follows the thinking-level hue, version recedes
     const wordmark = `${theme.bold(theme.fg(thinkingColorToken(this.ctx.thinkingLevel), "pi"))} ${theme.fg("dim", `v${VERSION}`)}`;
@@ -330,7 +347,7 @@ class WelcomeHeader implements Component {
       }
       lines.push(
         "",
-        this.theme.fg("dim", "/ commands · ! bash · ctrl+o more"),
+        this.theme.fg("dim", `/ commands · ! bash · ${keyHint("app.tools.expand", "more")}`),
       );
     }
     lines.push("");
