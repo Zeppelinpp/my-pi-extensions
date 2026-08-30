@@ -17,7 +17,11 @@
  */
 
 import type { BuildSystemPromptOptions, ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { estimateContextTokens } from "@earendil-works/pi-coding-agent";
+import {
+	CONFIG_DIR_NAME,
+	estimateContextTokens,
+	getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { matchesKey, type Theme, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -35,12 +39,12 @@ function charsToTokens(chars: number): number {
 }
 
 function findSystemPromptFiles(cwd: string): { system?: string; append?: string } {
-	const home = process.env.HOME || "~";
+	const agentDir = getAgentDir();
 	const candidates = [
-		{ type: "system" as const, path: join(cwd, ".pi", "SYSTEM.md") },
-		{ type: "system" as const, path: join(home, ".pi", "agent", "SYSTEM.md") },
-		{ type: "append" as const, path: join(cwd, ".pi", "APPEND_SYSTEM.md") },
-		{ type: "append" as const, path: join(home, ".pi", "agent", "APPEND_SYSTEM.md") },
+		{ type: "system" as const, path: join(cwd, CONFIG_DIR_NAME, "SYSTEM.md") },
+		{ type: "system" as const, path: join(agentDir, "SYSTEM.md") },
+		{ type: "append" as const, path: join(cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md") },
+		{ type: "append" as const, path: join(agentDir, "APPEND_SYSTEM.md") },
 	];
 	const result: { system?: string; append?: string } = {};
 	for (const c of candidates) {
@@ -204,8 +208,10 @@ class ContextPopup {
 	}
 
 	render(width: number): string[] {
+		if (width <= 1) return [truncateToWidth("Context", Math.max(0, width), "")];
+
 		const th = this.theme;
-		const innerW = Math.max(40, width - 2);
+		const innerW = Math.max(0, width - 2);
 		this.ensureLines(innerW);
 		const h = this.contentHeight;
 		// Clamp (or stick to bottom) after height/width changes, e.g. terminal resize.
@@ -218,12 +224,12 @@ class ContextPopup {
 		const out: string[] = [];
 
 		// Top border with embedded title
-		const title = th.fg("accent", " Context Inspector ");
-		const titleW = visibleWidth(" Context Inspector ");
-		out.push(b("╭") + b("─") + title + b("─".repeat(Math.max(0, innerW - 1 - titleW))) + b("╮"));
+		const title = truncateToWidth(th.fg("accent", " Context Inspector "), innerW, "");
+		const titleW = visibleWidth(title);
+		out.push(b("╭") + title + b("─".repeat(Math.max(0, innerW - titleW))) + b("╮"));
 
-		// Scrollbar geometry (only when content overflows)
-		const scrollable = this.lines.length > h;
+		// Scrollbar geometry (only when content overflows and has room)
+		const scrollable = this.lines.length > h && innerW >= 2;
 		const thumbSize = scrollable ? Math.max(1, Math.round((h * h) / this.lines.length)) : 0;
 		const thumbStart =
 			scrollable && maxScroll > 0 ? Math.round((this.scrollOffset / maxScroll) * (h - thumbSize)) : 0;
@@ -278,6 +284,11 @@ export default function contextInspector(pi: ExtensionAPI) {
 	pi.registerCommand("context", {
 		description: "Open context inspector popup (q=quit, j/k=scroll, PgUp/PgDn=page)",
 		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				if (ctx.hasUI) ctx.ui.notify("Context inspector requires interactive mode", "error");
+				return;
+			}
+
 			if (!captured) {
 				ctx.ui.notify("No context captured yet. Send a message first.", "warning");
 				return;

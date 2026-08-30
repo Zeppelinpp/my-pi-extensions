@@ -5,21 +5,37 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-// Resolve pi packages from the global pi install (same as Pi's loader aliases).
-const PI_MODULES =
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules";
+// Resolve pi packages from npm's global root on every supported platform.
+function resolvePiPackage(): string {
+  if (process.env.PI_CODING_AGENT_PACKAGE) return process.env.PI_CODING_AGENT_PACKAGE;
+  const windowsPrefix =
+    process.env.npm_config_prefix ||
+    (process.env.APPDATA ? join(process.env.APPDATA, "npm") : undefined);
+  const globalRoot =
+    process.platform === "win32" && windowsPrefix
+      ? join(windowsPrefix, "node_modules")
+      : execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+  return join(globalRoot, "@earendil-works", "pi-coding-agent");
+}
+
+const PI_PACKAGE = resolvePiPackage();
+const PI_MODULES = join(PI_PACKAGE, "node_modules");
 const require = createRequire(import.meta.url);
-const { createJiti } = require(`${PI_MODULES}/jiti`);
+const { createJiti } = require(join(PI_MODULES, "jiti"));
+const piTuiPath = join(PI_MODULES, "@earendil-works", "pi-tui");
 const jiti = createJiti(import.meta.url, {
   interopDefault: true,
   alias: {
-    "@earendil-works/pi-coding-agent": "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent",
-    "@earendil-works/pi-tui": `${PI_MODULES}/@earendil-works/pi-tui`,
+    "@earendil-works/pi-coding-agent": PI_PACKAGE,
+    "@earendil-works/pi-tui": piTuiPath,
   },
 });
-const { visibleWidth } = require(`${PI_MODULES}/@earendil-works/pi-tui`);
+const { visibleWidth } = require(piTuiPath);
 const ext = await jiti.import("../index.ts", { default: true });
 
 // -- stubs --
@@ -57,7 +73,7 @@ async function openPopup(opts: { rows?: number; skills?: number; totalTokens?: n
 
   const skills = Array.from({ length: opts.skills ?? 30 }, (_, i) => ({
     name: `skill-number-${i}`,
-    filePath: "/nonexistent", // getSkillTokens → 0
+    filePath: join(tmpdir(), "context-inspector-nonexistent"), // getSkillTokens → 0
     disableModelInvocation: i % 7 === 0,
   }));
   handlers.before_agent_start!({
@@ -67,7 +83,9 @@ async function openPopup(opts: { rows?: number; skills?: number; totalTokens?: n
 
   let component: any;
   const ctx = {
-    cwd: "/tmp",
+    cwd: tmpdir(),
+    mode: "tui",
+    hasUI: true,
     sessionManager: { buildSessionContext: () => ({ messages: [] }) },
     getContextUsage: () =>
       opts.totalTokens === null
@@ -98,11 +116,15 @@ test("height adapts to terminal rows; popup never exceeds terminal height", asyn
   }
 });
 
-test("all rows fit the inner width (ANSI-aware)", async () => {
+test("all rows fit the supplied width, including narrow terminals (ANSI-aware)", async () => {
   const { component } = await openPopup({ rows: 24, skills: 40 });
-  const width = 80;
-  for (const line of component.render(width)) {
-    assert.equal(visibleWidth(line), width, `row width mismatch: ${strip(line)}`);
+  for (const width of [80, 40, 30, 10, 2, 1]) {
+    for (const line of component.render(width)) {
+      assert.ok(
+        visibleWidth(line) <= width,
+        `width=${width}: row overflow: ${strip(line)}`,
+      );
+    }
   }
 });
 
