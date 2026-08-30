@@ -13,9 +13,19 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 type FocusPane = "list" | "diff";
+
+export function runGit(cwd: string, args: string[], timeout: number): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    timeout,
+    windowsHide: true,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+}
 
 class DiffViewComponent {
   private files: string[] = [];
@@ -43,8 +53,8 @@ class DiffViewComponent {
 
   private refreshFiles(): void {
     try {
-      const output = execSync("git diff --name-only", { cwd: this.cwd, encoding: "utf-8", timeout: 5000 });
-      this.files = output.trim().split("\n").filter(Boolean);
+      const output = runGit(this.cwd, ["diff", "--name-only", "-z"], 5000);
+      this.files = output.split("\0").filter(Boolean);
     } catch {
       this.files = [];
     }
@@ -60,7 +70,7 @@ class DiffViewComponent {
     const file = this.files[this.selectedIndex];
     if (!file || this.diffs.has(file)) return;
     try {
-      const diff = execSync(`git diff -- ${file}`, { cwd: this.cwd, encoding: "utf-8", timeout: 10000 });
+      const diff = runGit(this.cwd, ["diff", "--", file], 10000);
       this.diffs.set(file, diff);
     } catch {
       this.diffs.set(file, "");
@@ -290,16 +300,19 @@ export default function(pi: ExtensionAPI) {
   pi.registerCommand("diff", {
     description: "Show unstaged changes in a diff view",
     handler: async (_args: string, ctx: ExtensionCommandContext) => {
-      if (!ctx.hasUI) {
-        ctx.ui.notify("Diff view requires interactive mode", "error");
+      if (ctx.mode !== "tui") {
+        if (ctx.hasUI) ctx.ui.notify("Diff view requires interactive mode", "error");
         return;
       }
 
       // Verify git repo
       try {
-        execSync("git rev-parse --git-dir", { cwd: ctx.cwd, timeout: 3000 });
-      } catch {
-        ctx.ui.notify("Not a git repository", "error");
+        runGit(ctx.cwd, ["rev-parse", "--git-dir"], 3000);
+      } catch (error: any) {
+        ctx.ui.notify(
+          error?.code === "ENOENT" ? "Git executable not found on PATH" : "Not a git repository",
+          "error",
+        );
         return;
       }
 
