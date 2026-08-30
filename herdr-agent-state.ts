@@ -6,11 +6,22 @@
 // @ts-nocheck
 
 import net from "node:net";
+import { isAbsolute } from "node:path";
+
+export function normalizeSocketEndpoint(path: string | undefined): string | undefined {
+  if (!path || process.platform !== "win32") return path;
+
+  const normalized = path.replace(/\//g, "\\");
+  const prefix = "\\\\.\\pipe\\";
+  if (normalized.toLowerCase().startsWith(prefix.toLowerCase())) {
+    return prefix + normalized.slice(prefix.length).replace(/^\\+/, "");
+  }
+  return prefix + normalized.replace(/^\\+/, "");
+}
 
 const HERDR_ENV = process.env.HERDR_ENV;
 const socketPath = process.env.HERDR_SOCKET_PATH;
-const socketEndpoint =
-  process.platform === "win32" && socketPath ? `\\\\.\\pipe\\${socketPath}` : socketPath;
+const socketEndpoint = normalizeSocketEndpoint(socketPath);
 const paneId = process.env.HERDR_PANE_ID;
 const source = "herdr:pi";
 
@@ -74,7 +85,7 @@ function updateSessionRef(ctx: any): void {
   try {
     const file = ctx?.sessionManager?.getSessionFile?.();
     currentAgentSessionPath =
-      typeof file === "string" && file.startsWith("/") ? file : undefined;
+      typeof file === "string" && isAbsolute(file) ? file : undefined;
   } catch {
     currentAgentSessionPath = undefined;
   }
