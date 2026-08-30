@@ -25,6 +25,7 @@ import {
   deleteFileAndCleanDirs,
   loadChanges,
   loadRedoStack,
+  isPathWithin,
   popRedo,
   pushRedo,
   restoreSnapshotFile,
@@ -782,7 +783,7 @@ export default function(pi: ExtensionAPI) {
     const absolutePath = resolve(ctx.cwd, filePath);
     const relPath = relative(ctx.cwd, absolutePath);
 
-    if (relPath.startsWith("..") || relPath.startsWith("/")) return;
+    if (!isPathWithin(ctx.cwd, absolutePath)) return;
 
     const snapshotId = randomUUID();
     const sessionId = ctx.sessionManager.getSessionId();

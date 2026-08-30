@@ -21,7 +21,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { homedir } from "node:os";
 import type { ChangeRecord } from "./core.js";
 
@@ -54,6 +54,15 @@ export function getSnapshotDir(sessionId: string, snapshotId: string): string {
 
 function getRedoPath(sessionId: string): string {
   return join(baseDir(), sessionId, "redo.json");
+}
+
+/** Whether candidate is base itself or a real descendant on the current platform. */
+export function isPathWithin(base: string, candidate: string): boolean {
+  const rel = relative(base, candidate);
+  return (
+    rel === "" ||
+    (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`))
+  );
 }
 
 // -- Snapshots --
@@ -108,8 +117,7 @@ export async function deleteFileAndCleanDirs(absPath: string, stopAt: string): P
 }
 
 async function cleanupEmptyDirs(dir: string, stopAt: string): Promise<void> {
-  const rel = relative(stopAt, dir);
-  if (rel === "" || rel.startsWith("..")) return;
+  if (relative(stopAt, dir) === "" || !isPathWithin(stopAt, dir)) return;
   try {
     await rmdir(dir);
     await cleanupEmptyDirs(dirname(dir), stopAt);

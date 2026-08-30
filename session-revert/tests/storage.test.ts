@@ -14,6 +14,7 @@ import {
   clearRedo,
   deleteFileAndCleanDirs,
   getSnapshotDir,
+  isPathWithin,
   loadChanges,
   loadRedoStack,
   popRedo,
@@ -71,6 +72,21 @@ function makeRedo(n: number): RedoEntry {
     files: [{ path: "a.txt", absPath: "/tmp/work/a.txt", existed: true }],
     createdAt: n,
   };
+}
+
+// -- path containment --
+
+test("isPathWithin: accepts real descendants, including names beginning with two dots", async () => {
+  const dir = await freshDir();
+  assert.equal(isPathWithin(dir, join(dir, "child", "file.txt")), true);
+  assert.equal(isPathWithin(dir, join(dir, "..cache", "file.txt")), true);
+  assert.equal(isPathWithin(dir, join(dir, "..", "sibling", "file.txt")), false);
+});
+
+if (process.platform === "win32") {
+  test("isPathWithin: rejects a different Windows drive", async () => {
+    assert.equal(isPathWithin("C:\\work", "D:\\other\\file.txt"), false);
+  });
 }
 
 // -- snapshotFile / restoreSnapshotFile --
@@ -355,6 +371,20 @@ test("deleteFileAndCleanDirs: does not clean sibling directories with common pre
   assert.equal(await exists(join(stopAt, "a")), false, "empty parents cleaned");
   assert.equal(await exists(stopAt), true, "stopAt itself preserved");
   assert.equal(await exists(siblingDeep), true, "sibling dir with common prefix must survive");
+});
+
+test("deleteFileAndCleanDirs: cleans an in-tree directory beginning with two dots", async () => {
+  const dir = await freshDir();
+  const stopAt = join(dir, "work");
+  const nested = join(stopAt, "..cache", "nested");
+  await mkdir(nested, { recursive: true });
+  const f = join(nested, "x.txt");
+  await writeFile(f, "x", "utf8");
+
+  await deleteFileAndCleanDirs(f, stopAt);
+
+  assert.equal(await exists(join(stopAt, "..cache")), false);
+  assert.equal(await exists(stopAt), true);
 });
 
 test("deleteFileAndCleanDirs: refuses to delete a directory", async () => {
