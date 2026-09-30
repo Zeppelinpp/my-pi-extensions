@@ -158,16 +158,17 @@ function getGitDiffStats(
 		.filter(({ added, removed }) => added > 0 || removed > 0);
 }
 
-/** Render a small ASCII progress bar. */
+/** Render a small ASCII progress bar, tinted by the usage-threshold color. */
 function renderProgressBar(
 	percent: number,
 	width: number,
 	theme: Theme,
+	color: string = "success",
 ): string {
 	const w = Math.max(4, width);
 	const filled = Math.round((Math.min(100, Math.max(0, percent)) / 100) * w);
 	const empty = w - filled;
-	return theme.fg("success", "█".repeat(filled)) + theme.fg("dim", "░".repeat(empty));
+	return theme.fg(color, "█".repeat(filled)) + theme.fg("dim", "░".repeat(empty));
 }
 
 /** Join `left` and `right` with `sep`, keeping the right side immediately after the separator (not pushed to the terminal edge). Truncates left on overflow. */
@@ -237,9 +238,11 @@ function renderLine1(
 	if (repoDir) {
 		const repoName = basename(repoDir);
 		const branch = footerData.getGitBranch() || "none";
-		left = `${theme.fg("accent", repoName)} ${theme.fg("muted", `git:(${branch})`)}`;
+		// Repo is the subject of the line: cool cyan + bold. The model keeps
+		// accent purple as the single warm focal hue.
+		left = `${theme.bold(theme.fg("mdLink", repoName))} ${theme.fg("muted", `git:(${branch})`)}`;
 	} else {
-		left = theme.fg("accent", shortenPath(ctx.cwd));
+		left = theme.bold(theme.fg("mdLink", shortenPath(ctx.cwd)));
 	}
 
 	const modelId = ctx.model?.id ?? "unknown";
@@ -265,7 +268,7 @@ function renderLine2(
 		const tokensText =
 			usage.tokens !== null ? `${(usage.tokens / 1000).toFixed(1)}k` : "—";
 		const barWidth = Math.max(4, Math.min(14, Math.floor(width * 0.15)));
-		const bar = renderProgressBar(pct, barWidth, theme);
+		const bar = renderProgressBar(pct, barWidth, theme, color);
 		left = `${bar} ${theme.fg(color, pctText)} ${theme.fg("dim", `(${tokensText})`)}`;
 	} else {
 		left = theme.fg("dim", "—");
@@ -294,7 +297,8 @@ function renderLine3(
 		const removedStr = removed > 0 ? theme.fg("error", `-${removed}`) : "";
 		const sep = addedStr && removedStr ? theme.fg("dim", "|") : "";
 		const changes = `${addedStr}${sep}${removedStr}` || theme.fg("dim", "0");
-		return `${theme.fg("syntaxNumber", path)} ${changes}`;
+		// Paths are structure, not focus — muted lets the +/- counts pop.
+		return `${theme.fg("muted", path)} ${changes}`;
 	});
 
 	// Wrap entries across lines at entry boundaries instead of truncating.

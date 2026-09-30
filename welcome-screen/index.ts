@@ -84,16 +84,42 @@ interface PanelBridge {
   index: number;
 }
 
-interface Collapsible extends Component {
-  getCollapsedText(): string;
+interface PanelBridge {
+  host: { children: Component[]; removeChild(c: Component): void };
+  panel: { children: Component[]; invalidate(): void };
+  index: number;
+}
+
+/**
+ * Pi's resource sections changed shape in 0.99: pi-tui's ExpandableText
+ * (with getCollapsedText()) was replaced by internal ThemedText subclasses
+ * whose text lives behind a `build()` thunk; expansion is only visible via
+ * setExpanded(). Read either shape.
+ */
+interface SectionComponent extends Component {
+  build?(): string;
+  getCollapsedText?(): string;
+  setExpanded?(expanded: boolean): void;
 }
 
 function stripAnsi(text: string): string {
   return text.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
 }
 
-function isCollapsible(c: Component | undefined): c is Collapsible {
-  return typeof (c as Partial<Collapsible>)?.getCollapsedText === "function";
+function readSection(
+  c: Component,
+): { text: string; expandable: boolean } | undefined {
+  const section = c as SectionComponent;
+  if (typeof section.getCollapsedText === "function") {
+    return { text: section.getCollapsedText(), expandable: true };
+  }
+  if (typeof section.build === "function") {
+    return {
+      text: section.build(),
+      expandable: typeof section.setExpanded === "function",
+    };
+  }
+  return undefined;
 }
 
 function hasChildren(c: unknown): c is { children: Component[] } {
@@ -151,8 +177,10 @@ function extName(label: string): string {
   let s = label.trim().replace(/^npm:/, "").replace(/\\/g, "/");
   const colon = s.lastIndexOf(":");
   if (colon > 1) s = s.slice(0, colon); // strip ":src" entry-point suffix
+  s = s.replace(/\.[cm]?[jt]s$/, "");
+  if (s.endsWith("/index")) s = s.slice(0, -"/index".length); // dir-style entry
   if (s.includes("/") && !s.startsWith("@")) s = s.split("/").pop() ?? s;
-  return s.replace(/\.[cm]?[jt]s$/, "");
+  return s;
 }
 
 function parsePanel(panel: PanelBridge["panel"]): Sections {
@@ -160,8 +188,9 @@ function parsePanel(panel: PanelBridge["panel"]): Sections {
   const warnings: string[] = [];
 
   for (const child of panel.children) {
-    if (!isCollapsible(child)) continue;
-    const text = stripAnsi(child.getCollapsedText());
+    const section = readSection(child);
+    if (!section) continue;
+    const text = stripAnsi(section.text);
     const [head = "", ...rest] = text.split("\n");
     const heading = head.trim().match(/^\[([^\]]+)\]$/)?.[1];
     if (!heading) continue;
@@ -169,12 +198,14 @@ function parsePanel(panel: PanelBridge["panel"]): Sections {
 
     const key = SECTION_HEADINGS[heading];
     if (!key) {
+      // Non-expandable notices, e.g. [Skill conflicts], surface as warnings.
       warnings.push(heading);
       continue;
     }
+    // Collapsed lists are comma-separated; expanded lists are one per line.
     const body = rest
-      .join(" ")
-      .split(",")
+      .join("\n")
+      .split(/[\n,]/)
       .map((s) => s.trim())
       .filter(Boolean);
     items[key] = [
