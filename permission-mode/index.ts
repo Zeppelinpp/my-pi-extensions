@@ -138,7 +138,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ── Shortcut ──
-  pi.registerShortcut("shift+tab", {
+  pi.registerShortcut("alt+m", {
     description: "Cycle permission mode (Accept / Ask / Bypass)",
     handler: async (ctx) => cycleMode(ctx),
   });
